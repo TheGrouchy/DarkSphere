@@ -1,0 +1,441 @@
+{
+  "name": "DarkSpere: Real-Time Analytics & Metrics",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "metrics-trigger",
+      "name": "Every Minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [250, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) as total_sessions, COUNT(CASE WHEN is_active = TRUE THEN 1 END) as active_sessions, COUNT(CASE WHEN is_active = FALSE THEN 1 END) as inactive_sessions FROM agent_sessions",
+        "options": {}
+      },
+      "id": "get-session-stats",
+      "name": "Get Session Stats",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [450, 200],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) as total_messages, COUNT(CASE WHEN direction = 'inbound' THEN 1 END) as inbound_messages, COUNT(CASE WHEN direction = 'outbound' THEN 1 END) as outbound_messages, AVG(EXTRACT(EPOCH FROM (responded_at - received_at))) as avg_response_time FROM message_history WHERE created_at >= NOW() - INTERVAL '1 hour'",
+        "options": {}
+      },
+      "id": "get-message-stats",
+      "name": "Get Message Stats",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [450, 300],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) as total_agents, COUNT(CASE WHEN status = 'active' THEN 1 END) as active_agents, COUNT(CASE WHEN status = 'degraded' THEN 1 END) as degraded_agents, COUNT(CASE WHEN status = 'offline' THEN 1 END) as offline_agents, SUM(current_sessions) as total_agent_sessions, AVG(current_sessions::DECIMAL / NULLIF(max_concurrent_sessions, 0)::DECIMAL * 100) as avg_capacity_usage FROM agent_registry",
+        "options": {}
+      },
+      "id": "get-agent-stats",
+      "name": "Get Agent Stats",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [450, 400],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT agent_id, current_status, health_score, avg_response_time_ms, last_check FROM agent_health_summary WHERE current_status = 'unhealthy' OR health_score < 70",
+        "options": {}
+      },
+      "id": "get-unhealthy-agents",
+      "name": "Get Unhealthy Agents",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [450, 500],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT phone_number, COUNT(*) as message_count, MAX(last_activity) as last_activity FROM agent_sessions WHERE is_active = TRUE GROUP BY phone_number ORDER BY message_count DESC LIMIT 10",
+        "options": {}
+      },
+      "id": "get-top-users",
+      "name": "Get Top Active Users",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [450, 600],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const sessionStats = $('Get Session Stats').first().json;\nconst messageStats = $('Get Message Stats').first().json;\nconst agentStats = $('Get Agent Stats').first().json;\nconst unhealthyAgents = $('Get Unhealthy Agents').all().map(item => item.json);\nconst topUsers = $('Get Top Active Users').all().map(item => item.json);\n\nconst metrics = {\n  timestamp: new Date().toISOString(),\n  sessions: {\n    total: parseInt(sessionStats.total_sessions || 0),\n    active: parseInt(sessionStats.active_sessions || 0),\n    inactive: parseInt(sessionStats.inactive_sessions || 0)\n  },\n  messages: {\n    total_last_hour: parseInt(messageStats.total_messages || 0),\n    inbound: parseInt(messageStats.inbound_messages || 0),\n    outbound: parseInt(messageStats.outbound_messages || 0),\n    avg_response_time_seconds: parseFloat(messageStats.avg_response_time || 0).toFixed(2)\n  },\n  agents: {\n    total: parseInt(agentStats.total_agents || 0),\n    active: parseInt(agentStats.active_agents || 0),\n    degraded: parseInt(agentStats.degraded_agents || 0),\n    offline: parseInt(agentStats.offline_agents || 0),\n    total_sessions: parseInt(agentStats.total_agent_sessions || 0),\n    avg_capacity_usage_percent: parseFloat(agentStats.avg_capacity_usage || 0).toFixed(2)\n  },\n  health: {\n    unhealthy_agents_count: unhealthyAgents.length,\n    unhealthy_agents: unhealthyAgents\n  },\n  top_users: topUsers.slice(0, 5),\n  system_status: {\n    overall: unhealthyAgents.length === 0 ? 'healthy' : 'degraded',\n    capacity_status: agentStats.avg_capacity_usage > 80 ? 'high' : agentStats.avg_capacity_usage > 50 ? 'medium' : 'low'\n  }\n};\n\nreturn { json: metrics };"
+      },
+      "id": "aggregate-metrics",
+      "name": "Aggregate All Metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO analytics_snapshots (snapshot_type, metrics, created_at) VALUES ('realtime_metrics', $1, NOW()) RETURNING *",
+        "options": {
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "metrics",
+                "value": "={{ JSON.stringify($json) }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "store-metrics",
+      "name": "Store Metrics Snapshot",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [850, 400],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $('Aggregate All Metrics').item.json.health.unhealthy_agents_count }}",
+                    "rightValue": 0,
+                    "operator": {
+                      "type": "number",
+                      "operation": "gt"
+                    }
+                  }
+                ],
+                "combinator": "or"
+              },
+              "renameOutput": true,
+              "outputKey": "Alert Required"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ parseFloat($('Aggregate All Metrics').item.json.agents.avg_capacity_usage_percent) }}",
+                    "rightValue": 85,
+                    "operator": {
+                      "type": "number",
+                      "operation": "gt"
+                    }
+                  }
+                ],
+                "combinator": "or"
+              },
+              "renameOutput": true,
+              "outputKey": "Capacity Alert"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": 3
+        }
+      },
+      "id": "alert-check",
+      "name": "Check Alert Conditions",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.3,
+      "position": [1050, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const metrics = $('Aggregate All Metrics').item.json;\n\nconst alert = {\n  alert_type: 'unhealthy_agents',\n  severity: 'warning',\n  title: `${metrics.health.unhealthy_agents_count} Unhealthy Agent(s) Detected`,\n  message: `DarkSpere has detected ${metrics.health.unhealthy_agents_count} unhealthy agent(s). Immediate attention required.`,\n  details: metrics.health.unhealthy_agents,\n  timestamp: new Date().toISOString(),\n  metrics_snapshot: metrics\n};\n\nreturn { json: alert };"
+      },
+      "id": "format-health-alert",
+      "name": "Format Health Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const metrics = $('Aggregate All Metrics').item.json;\n\nconst alert = {\n  alert_type: 'high_capacity',\n  severity: 'warning',\n  title: `High Capacity Usage: ${metrics.agents.avg_capacity_usage_percent}%`,\n  message: `Agent capacity usage is at ${metrics.agents.avg_capacity_usage_percent}%. Consider scaling up.`,\n  details: {\n    total_sessions: metrics.agents.total_sessions,\n    active_agents: metrics.agents.active,\n    capacity_percentage: metrics.agents.avg_capacity_usage_percent\n  },\n  timestamp: new Date().toISOString(),\n  metrics_snapshot: metrics\n};\n\nreturn { json: alert };"
+      },
+      "id": "format-capacity-alert",
+      "name": "Format Capacity Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 500]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO system_alerts (alert_type, severity, title, message, details, created_at) VALUES ($1, $2, $3, $4, $5, NOW()) RETURNING *",
+        "options": {
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "alert_type",
+                "value": "={{ $json.alert_type }}"
+              },
+              {
+                "name": "severity",
+                "value": "={{ $json.severity }}"
+              },
+              {
+                "name": "title",
+                "value": "={{ $json.title }}"
+              },
+              {
+                "name": "message",
+                "value": "={{ $json.message }}"
+              },
+              {
+                "name": "details",
+                "value": "={{ JSON.stringify($json.details) }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "record-alert",
+      "name": "Record Alert",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1450, 400],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every Minute": {
+      "main": [
+        [
+          {
+            "node": "Get Session Stats",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Message Stats",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Agent Stats",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Unhealthy Agents",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Top Active Users",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Session Stats": {
+      "main": [
+        [
+          {
+            "node": "Aggregate All Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Message Stats": {
+      "main": [
+        [
+          {
+            "node": "Aggregate All Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Agent Stats": {
+      "main": [
+        [
+          {
+            "node": "Aggregate All Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Unhealthy Agents": {
+      "main": [
+        [
+          {
+            "node": "Aggregate All Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Top Active Users": {
+      "main": [
+        [
+          {
+            "node": "Aggregate All Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate All Metrics": {
+      "main": [
+        [
+          {
+            "node": "Store Metrics Snapshot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Metrics Snapshot": {
+      "main": [
+        [
+          {
+            "node": "Check Alert Conditions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Alert Conditions": {
+      "main": [
+        [
+          {
+            "node": "Format Health Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Capacity Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Format Health Alert": {
+      "main": [
+        [
+          {
+            "node": "Record Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Capacity Alert": {
+      "main": [
+        [
+          {
+            "node": "Record Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "DarkSpere",
+      "id": "darkspere"
+    },
+    {
+      "name": "Analytics",
+      "id": "analytics"
+    },
+    {
+      "name": "Monitoring",
+      "id": "monitoring"
+    }
+  ]
+}

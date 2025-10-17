@@ -1,0 +1,349 @@
+{
+  "name": "DarkSpere: MCP Agent Test Suite",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "test/mcp-agent",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "test-trigger",
+      "name": "Test Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300],
+      "webhookId": "mcp-agent-test"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT agent_id, agent_name, endpoint_url, api_key_hash, agent_type FROM agent_registry WHERE status = 'active' LIMIT 1",
+        "options": {}
+      },
+      "id": "get-test-agent",
+      "name": "Get Test Agent",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [450, 300],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const testPhone = '+15555551234';\nconst testAgentId = $input.item.json.agent_id;\nconst testMessage = 'Test MCP message from DarkSpere Test Suite';\n\nconst mcpRequest = {\n  type: 'chat.request',\n  session_id: `test-${Date.now()}`,\n  phone_number: testPhone,\n  message: testMessage,\n  context: {\n    session_id: `test-${Date.now()}`,\n    phone_number: testPhone,\n    conversation_history: [\n      {\n        role: 'user',\n        content: testMessage,\n        timestamp: new Date().toISOString()\n      }\n    ],\n    user_preferences: {},\n    session_state: {}\n  },\n  metadata: {\n    test_mode: true,\n    test_suite: 'mcp-agent-test',\n    timestamp: new Date().toISOString()\n  }\n};\n\nreturn {\n  json: {\n    ...mcpRequest,\n    endpoint_url: $input.item.json.endpoint_url,\n    api_key_hash: $input.item.json.api_key_hash,\n    agent_name: $input.item.json.agent_name\n  }\n};"
+      },
+      "id": "build-mcp-request",
+      "name": "Build MCP Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.endpoint_url }}/mcp",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "jsonBody": "={{ JSON.stringify({\n  type: $json.type,\n  session_id: $json.session_id,\n  phone_number: $json.phone_number,\n  message: $json.message,\n  context: $json.context,\n  metadata: $json.metadata\n}) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $json.api_key_hash }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-MCP-Version",
+              "value": "1.0"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "retry": {
+            "maxTries": 1
+          }
+        }
+      },
+      "id": "send-mcp-request",
+      "name": "Send MCP Request",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [850, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.statusCode }}",
+                    "rightValue": 200,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  },
+                  {
+                    "leftValue": "={{ $json.body?.type }}",
+                    "rightValue": "chat.response",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Success"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.error }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "string",
+                      "operation": "notEmpty"
+                    }
+                  }
+                ],
+                "combinator": "or"
+              },
+              "renameOutput": true,
+              "outputKey": "Failure"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "test-result-switch",
+      "name": "Test Result",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.3,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const testResult = {\n  test_name: 'MCP Agent Communication Test',\n  agent_name: $('Build MCP Request').item.json.agent_name,\n  agent_endpoint: $('Build MCP Request').item.json.endpoint_url,\n  status: 'success',\n  response_time_ms: $json.headers?.['x-response-time'] || 0,\n  mcp_response: {\n    type: $json.body?.type,\n    message: $json.body?.message,\n    session_id: $json.body?.session_id\n  },\n  metadata: {\n    timestamp: new Date().toISOString(),\n    status_code: $json.statusCode,\n    test_suite_version: '1.0'\n  }\n};\n\nreturn { json: testResult };"
+      },
+      "id": "format-success",
+      "name": "Format Success Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "const testResult = {\n  test_name: 'MCP Agent Communication Test',\n  agent_name: $('Build MCP Request').item.json.agent_name,\n  agent_endpoint: $('Build MCP Request').item.json.endpoint_url,\n  status: 'failure',\n  error_message: $json.error || 'MCP request failed',\n  response_time_ms: $json.headers?.['x-response-time'] || 0,\n  metadata: {\n    timestamp: new Date().toISOString(),\n    status_code: $json.statusCode || 0,\n    test_suite_version: '1.0',\n    error_details: $json\n  }\n};\n\nreturn { json: testResult };"
+      },
+      "id": "format-failure",
+      "name": "Format Failure Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO test_results (test_type, agent_id, status, response_time_ms, test_data, created_at) VALUES ('mcp_agent_test', $1, $2, $3, $4, NOW()) RETURNING *",
+        "options": {
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "agent_id",
+                "value": "={{ $('Get Test Agent').item.json.agent_id }}"
+              },
+              {
+                "name": "status",
+                "value": "={{ $json.status }}"
+              },
+              {
+                "name": "response_time",
+                "value": "={{ $json.response_time_ms }}"
+              },
+              {
+                "name": "test_data",
+                "value": "={{ JSON.stringify($json) }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "record-test-result",
+      "name": "Record Test Result",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1450, 300],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json, null, 2) }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "webhook-response",
+      "name": "Send Test Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1650, 300]
+    }
+  ],
+  "connections": {
+    "Test Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Test Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Test Agent": {
+      "main": [
+        [
+          {
+            "node": "Build MCP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build MCP Request": {
+      "main": [
+        [
+          {
+            "node": "Send MCP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send MCP Request": {
+      "main": [
+        [
+          {
+            "node": "Test Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test Result": {
+      "main": [
+        [
+          {
+            "node": "Format Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Failure Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Success Result": {
+      "main": [
+        [
+          {
+            "node": "Record Test Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Failure Result": {
+      "main": [
+        [
+          {
+            "node": "Record Test Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Test Result": {
+      "main": [
+        [
+          {
+            "node": "Send Test Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "DarkSpere",
+      "id": "darkspere"
+    },
+    {
+      "name": "Testing",
+      "id": "testing"
+    },
+    {
+      "name": "MCP",
+      "id": "mcp"
+    }
+  ]
+}

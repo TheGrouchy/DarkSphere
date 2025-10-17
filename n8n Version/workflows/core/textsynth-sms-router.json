@@ -1,0 +1,602 @@
+{
+  "name": "DarkSpere: SMS-to-Agent Router",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 📱 DarkSpere: SMS-to-Agent Data Transmission System\n\n**Architecture Focus**: Component-to-Component Data Flow\n\n### 🎯 What This Workflow Does\n\nRoutes SMS messages from users to remote AI agents with:\n- ⚡ Sub-50ms session routing\n- 🔄 Complete conversation context\n- 📊 Full transmission audit trail\n- 🛡️ Automatic error handling & retries\n\n### 📈 Data Flow Path\n\n```\nUser SMS → Twilio\n    ↓\n[1] Webhook Receives SMS\n    ↓\n[2] Parse Twilio Data\n    ↓\n[3] Session Lookup (PostgreSQL)\n    ↓\n[4] Get Conversation Context\n    ↓\n[5] Store Inbound Message\n    ↓\n[6] Call Remote Agent API\n    ↓\n[7] Store Outbound Message\n    ↓\n[8] Send TwiML Response\n    ↓\nUser Receives SMS\n```\n\n### ⚙️ Prerequisites\n\n1. **PostgreSQL Database** deployed with schema\n2. **Twilio Account** with phone number\n3. **Agent Endpoint** registered in database\n4. **PostgreSQL Credential** configured in n8n\n\n### 🚀 Quick Start\n\n1. Activate this workflow\n2. Copy webhook URL from \"Twilio Webhook\" node\n3. Configure in Twilio: Phone Numbers → Messaging\n4. Send test SMS to your Twilio number\n\n### 📊 Performance Targets\n\n- Session Lookup: < 50ms\n- Total Roundtrip: < 8 seconds\n- Throughput: 100-200 msgs/min (single worker)",
+        "height": 560,
+        "width": 440,
+        "color": 4
+      },
+      "id": "overview-note",
+      "name": "📋 WORKFLOW OVERVIEW",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-120, 80]
+    },
+    {
+      "parameters": {
+        "content": "## 🎣 STEP 1: Receive SMS from Twilio\n\n**Node Type**: Webhook Trigger\n\n### What It Does\nListens for incoming SMS messages from Twilio via HTTP POST webhook.\n\n### Data Received from Twilio\n```json\n{\n  \"From\": \"+15551234567\",\n  \"To\": \"+15558888888\",\n  \"Body\": \"User's message text\",\n  \"MessageSid\": \"SM...\"\n}\n```\n\n### Configuration\n- **Path**: `/sms/incoming`\n- **Method**: POST\n- **Response Mode**: Response Node (waits for workflow)\n\n### Production Webhook URL\nCopy from node properties and paste into:\n**Twilio Console** → Phone Numbers → Your Number → Messaging\n\n### Testing\n1. Click \"Listen for Test Event\"\n2. Send SMS to Twilio number\n3. Or use Postman/curl with test payload\n\n### ⚠️ Important\n- Webhook must respond within 10 seconds (Twilio timeout)\n- Use \"Respond to Webhook\" node at end of workflow\n- Do not use \"Respond\" mode on this node",
+        "height": 480,
+        "width": 380,
+        "color": 5
+      },
+      "id": "webhook-note",
+      "name": "📝 Webhook Trigger",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [200, 480]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sms/incoming",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Twilio Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "webhookId": "darkspere-sms-incoming",
+      "notes": "🎣 Entry point: Receives SMS from Twilio webhook"
+    },
+    {
+      "parameters": {
+        "content": "## 🔍 STEP 2: Parse Twilio Data\n\n**Node Type**: Set (Data Transformation)\n\n### What It Does\nExtracts and normalizes Twilio webhook data into clean variables for downstream nodes.\n\n### Input (from Twilio)\n```json\n$json.body.From\n$json.body.To\n$json.body.Body\n$json.body.MessageSid\n```\n\n### Output Variables\n- `phone_from`: Sender's phone (+15551234567)\n- `phone_to`: Twilio number (+15558888888)\n- `message_body`: SMS text content\n- `twilio_sid`: Unique message identifier\n- `timestamp`: ISO 8601 timestamp\n\n### Why This Step?\n- Normalizes variable names\n- Adds timestamp for tracking\n- Makes data easier to reference in later nodes\n- Protects against Twilio payload changes\n\n### Data Transmission Path\n✅ Twilio → n8n (received)\n⏭️ Next: PostgreSQL session lookup",
+        "height": 400,
+        "width": 380,
+        "color": 5
+      },
+      "id": "parse-note",
+      "name": "📝 Parse Data",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [420, 480]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "phone_from",
+              "value": "={{ $json.body.From }}"
+            },
+            {
+              "name": "phone_to",
+              "value": "={{ $json.body.To }}"
+            },
+            {
+              "name": "message_body",
+              "value": "={{ $json.body.Body }}"
+            },
+            {
+              "name": "twilio_sid",
+              "value": "={{ $json.body.MessageSid }}"
+            },
+            {
+              "name": "timestamp",
+              "value": "={{ $now.toISO() }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "parse-twilio-data",
+      "name": "Parse Twilio Data",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [460, 300],
+      "notes": "🔍 Extracts: phone_from, phone_to, message_body, twilio_sid"
+    },
+    {
+      "parameters": {
+        "content": "## 🎯 STEP 3: Session Lookup & Routing\n\n**Node Type**: PostgreSQL Query\n**Performance**: < 50ms (optimized index)\n\n### What It Does\nUses atomic database function to:\n1. Find existing session for phone number\n2. OR create new session with agent assignment\n3. Returns agent endpoint for routing\n\n### SQL Function Called\n```sql\nget_or_create_session('+15551234567')\n```\n\n### Returns\n- `session_id`: UUID for this conversation\n- `agent_id`: Assigned agent UUID\n- `agent_endpoint`: Agent's HTTP API URL\n- `api_key_hash`: Authentication key\n- `session_state`: JSONB conversation state\n- `conversation_context`: Recent messages\n\n### Load Balancing Logic\nIf creating new session:\n- Finds agent with `status='active'`\n- Chooses least-busy agent\n- Updates `current_sessions` counter\n\n### Database Index Used\n`idx_phone_active_routing` on `(phone_number, is_active)`\n\n### Data Transmission Path\n✅ Twilio → n8n → PostgreSQL\n⏭️ Next: Get conversation context\n\n### ⚠️ Configuration Required\n- PostgreSQL credential: `DarkSpere PostgreSQL`\n- Database must have schema deployed\n- At least one active agent registered",
+        "height": 520,
+        "width": 380,
+        "color": 6
+      },
+      "id": "session-note",
+      "name": "📝 Session Routing",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [640, 480]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM get_or_create_session('={{ $json.phone_from }}')",
+        "options": {}
+      },
+      "id": "session-lookup",
+      "name": "Session Lookup",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [680, 300],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      },
+      "notes": "🎯 PRIMARY ROUTING: Maps phone → agent endpoint (< 50ms)"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "session-exists",
+              "leftValue": "={{ $json.session_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-session",
+      "name": "Check Session Exists",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 300],
+      "notes": "✅ Validates session was found/created successfully"
+    },
+    {
+      "parameters": {
+        "content": "## 💬 STEP 4: Get Conversation Context\n\n**Node Type**: PostgreSQL Query\n**Performance**: < 100ms\n\n### What It Does\nRetrieves last 10 messages from conversation for AI context building.\n\n### SQL Function Called\n```sql\nget_conversation_history(session_id, 10)\n```\n\n### Returns Array of Messages\n```json\n[\n  {\n    \"direction\": \"inbound\",\n    \"message_text\": \"User's previous message\",\n    \"timestamp\": \"2025-10-10T14:30:00Z\"\n  },\n  {\n    \"direction\": \"outbound\",\n    \"message_text\": \"Agent's previous response\",\n    \"timestamp\": \"2025-10-10T14:30:05Z\"\n  }\n]\n```\n\n### Why This Matters\n- Enables context-aware agent responses\n- Maintains conversation continuity\n- Used by AI for better understanding\n- Passed to agent API in next step\n\n### Database Index Used\n`idx_session_messages_ordered` on `(session_id, timestamp DESC)`\n\n### Data Flow\n✅ Session established\n✅ Fetching conversation history\n⏭️ Next: Store inbound message",
+        "height": 440,
+        "width": 380,
+        "color": 6
+      },
+      "id": "context-note",
+      "name": "📝 Context Retrieval",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1080, -180]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM get_conversation_history('={{ $('Session Lookup').item.json.session_id }}', 10)",
+        "options": {}
+      },
+      "id": "get-context",
+      "name": "Get Conversation Context",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1120, 200],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      },
+      "notes": "💬 Fetches last 10 messages for AI context"
+    },
+    {
+      "parameters": {
+        "content": "## 📝 STEP 5: Store Inbound Message\n\n**Node Type**: PostgreSQL Insert\n**Table**: `message_history`\n\n### What It Does\nLogs the incoming SMS message with complete transmission metadata.\n\n### Data Stored\n- `session_id`: Links to session\n- `direction`: \"inbound\"\n- `sender`: User's phone number\n- `recipient`: Twilio number\n- `message_text`: SMS content\n- `twilio_message_sid`: Twilio's unique ID\n- `transmission_path`: JSON tracking path\n- `n8n_execution_id`: This workflow execution\n- `transmission_status`: \"transmitted\"\n\n### Transmission Path Logged\n```json\n{\n  \"path\": [\n    \"twilio_webhook\",\n    \"n8n_trigger\",\n    \"session_lookup\"\n  ],\n  \"timestamp_received\": \"2025-10-10T14:30:00Z\"\n}\n```\n\n### Why Log This?\n- Complete audit trail\n- Debugging transmission issues\n- Performance monitoring\n- Compliance/legal requirements\n\n### Triggers Executed\n- Updates `session.last_activity`\n- Increments `session.total_messages_received`\n\n### Data Flow\n✅ Message received and logged\n⏭️ Next: Call agent API",
+        "height": 480,
+        "width": 380,
+        "color": 3
+      },
+      "id": "store-inbound-note",
+      "name": "📝 Store Inbound",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1300, -180]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO message_history (\n  session_id,\n  direction,\n  sender,\n  recipient,\n  message_text,\n  transmission_path,\n  twilio_message_sid,\n  agent_endpoint,\n  n8n_execution_id,\n  transmission_status\n) VALUES (\n  '={{ $('Session Lookup').item.json.session_id }}',\n  'inbound',\n  '={{ $('Parse Twilio Data').item.json.phone_from }}',\n  '={{ $('Parse Twilio Data').item.json.phone_to }}',\n  '={{ $('Parse Twilio Data').item.json.message_body }}',\n  '{\"path\": [\"twilio_webhook\", \"n8n_trigger\", \"session_lookup\"], \"timestamp_received\": \"={{ $now.toISO() }}\"}'::jsonb,\n  '={{ $('Parse Twilio Data').item.json.twilio_sid }}',\n  '={{ $('Session Lookup').item.json.agent_endpoint }}',\n  '={{ $execution.id }}',\n  'transmitted'\n) RETURNING message_id, timestamp;",
+        "options": {}
+      },
+      "id": "store-inbound-message",
+      "name": "Store Inbound Message",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1340, 200],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      },
+      "notes": "📝 Logs inbound message with full transmission metadata"
+    },
+    {
+      "parameters": {
+        "content": "## 🤖 STEP 6: Call Remote Agent API\n\n**Node Type**: HTTP Request\n**Timeout**: 10 seconds\n**Retries**: 3 attempts (1s interval)\n\n### What It Does\nSends message to remote agent's HTTP endpoint with context.\n\n### Request Details\n\n**Method**: POST\n**URL**: From `agent_endpoint` (database)\n\n**Headers**:\n```\nX-API-Key: {api_key_hash}\nContent-Type: application/json\n```\n\n**Body**:\n```json\n{\n  \"session_id\": \"uuid\",\n  \"message\": \"User's SMS text\",\n  \"context\": [/* last 10 messages */],\n  \"user_phone\": \"+15551234567\",\n  \"timestamp\": \"2025-10-10T14:30:00Z\"\n}\n```\n\n### Expected Response\n```json\n{\n  \"response\": \"Agent's text reply\",\n  \"metadata\": {\n    \"processing_time_ms\": 450,\n    \"agent_version\": \"1.0.0\"\n  }\n}\n```\n\n### Error Handling\n- **Timeout after 10s**: Prevents Twilio timeout\n- **3 automatic retries**: Handles transient failures\n- **Error path**: Routes to \"Log Error\" node\n- **Fallback message**: User gets friendly error\n\n### Agent Requirements\n1. Respond within 10 seconds\n2. Validate X-API-Key header\n3. Return JSON with `response` field\n4. Handle malformed requests\n\n### Data Transmission\n✅ Twilio → n8n → PostgreSQL → Agent API\n⏭️ Next: Store agent's response",
+        "height": 560,
+        "width": 400,
+        "color": 7
+      },
+      "id": "agent-api-note",
+      "name": "📝 Agent API Call",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1520, -200]
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Session Lookup').item.json.agent_endpoint }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $('Session Lookup').item.json.api_key_hash }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "session_id",
+              "value": "={{ $('Session Lookup').item.json.session_id }}"
+            },
+            {
+              "name": "message",
+              "value": "={{ $('Parse Twilio Data').item.json.message_body }}"
+            },
+            {
+              "name": "context",
+              "value": "={{ $('Get Conversation Context').all() }}"
+            },
+            {
+              "name": "user_phone",
+              "value": "={{ $('Parse Twilio Data').item.json.phone_from }}"
+            },
+            {
+              "name": "timestamp",
+              "value": "={{ $now.toISO() }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000,
+          "retry": {
+            "retry": {
+              "maxRetries": 3,
+              "retryInterval": 1000
+            }
+          }
+        }
+      },
+      "id": "call-agent-api",
+      "name": "Call Agent API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1560, 200],
+      "notes": "🤖 CRITICAL: Sends message to remote agent (10s timeout, 3 retries)"
+    },
+    {
+      "parameters": {
+        "content": "## 📤 STEP 7: Store Outbound Message\n\n**Node Type**: PostgreSQL Insert\n**Table**: `message_history`\n\n### What It Does\nLogs the agent's response with processing metrics.\n\n### Data Stored\n- `direction`: \"outbound\"\n- `message_text`: Agent's response text\n- `agent_response`: Full JSON response\n- `agent_processing_time_ms`: Agent latency\n- `transmission_path`: Continued path tracking\n- `transmission_status`: \"delivered\"\n\n### Transmission Path\n```json\n{\n  \"path\": [\n    \"agent_api\",\n    \"n8n_handler\",\n    \"postgres_store\"\n  ],\n  \"timestamp_sent\": \"2025-10-10T14:30:05Z\"\n}\n```\n\n### Performance Metrics Captured\n- Agent processing time (ms)\n- n8n workflow time (ms)\n- Total roundtrip latency\n\n### Database Triggers\n- Updates `session.total_messages_sent`\n- Sets `session.last_transmitted_message_id`\n- Updates `session.last_activity`\n\n### Data Flow\n✅ Full transmission path logged\n⏭️ Next: Send TwiML response to Twilio",
+        "height": 440,
+        "width": 380,
+        "color": 3
+      },
+      "id": "store-outbound-note",
+      "name": "📝 Store Outbound",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1740, -180]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO message_history (\n  session_id,\n  direction,\n  sender,\n  recipient,\n  message_text,\n  transmission_path,\n  agent_endpoint,\n  agent_response,\n  agent_processing_time_ms,\n  n8n_execution_id,\n  transmission_status\n) VALUES (\n  '={{ $('Session Lookup').item.json.session_id }}',\n  'outbound',\n  '={{ $('Parse Twilio Data').item.json.phone_to }}',\n  '={{ $('Parse Twilio Data').item.json.phone_from }}',\n  '={{ $json.response }}',\n  '{\"path\": [\"agent_api\", \"n8n_handler\", \"postgres_store\"], \"timestamp_sent\": \"={{ $now.toISO() }}\"}'::jsonb,\n  '={{ $('Session Lookup').item.json.agent_endpoint }}',\n  '{{ $json }}'::jsonb,\n  {{ $json.metadata?.processing_time_ms || 0 }},\n  '={{ $execution.id }}',\n  'delivered'\n) RETURNING message_id;",
+        "options": {}
+      },
+      "id": "store-outbound-message",
+      "name": "Store Outbound Message",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1780, 200],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      },
+      "notes": "📤 Logs agent response with processing metrics"
+    },
+    {
+      "parameters": {
+        "content": "## 📲 STEP 8: Send TwiML Response\n\n**Node Type**: Respond to Webhook\n**Format**: TwiML XML\n\n### What It Does\nSends formatted response back to Twilio for SMS delivery.\n\n### TwiML Format\n```xml\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Response>\n  <Message>Agent's text response</Message>\n</Response>\n```\n\n### Headers\n```\nContent-Type: text/xml\n```\n\n### Timing Critical\n- Must respond within 10 seconds\n- Twilio will timeout otherwise\n- User won't receive SMS if timeout\n\n### Response Codes\n- **200 OK**: SMS will be sent\n- **4xx/5xx**: Error, SMS not sent\n\n### Complete Data Path\n```\nUser SMS\n  ↓\nTwilio → n8n → PostgreSQL (session)\n  ↓\nn8n → Agent API → n8n\n  ↓\nPostgreSQL (log) → n8n → Twilio\n  ↓\nUser receives SMS\n```\n\n✅ **END OF SUCCESS PATH**\n\n### Performance Check\nQuery database:\n```sql\nSELECT * FROM message_history\nWHERE session_id = 'your-session-id'\nORDER BY timestamp DESC;\n```",
+        "height": 500,
+        "width": 380,
+        "color": 2
+      },
+      "id": "response-note",
+      "name": "📝 TwiML Response",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1960, -180]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Response>\n    <Message>={{ $('Call Agent API').item.json.response }}</Message>\n</Response>",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/xml"
+              }
+            ]
+          }
+        }
+      },
+      "id": "respond-to-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2000, 200],
+      "notes": "📲 SUCCESS: Sends TwiML to Twilio → User receives SMS"
+    },
+    {
+      "parameters": {
+        "content": "## ⚠️ ERROR HANDLING PATH\n\n**Triggered When**: Agent API call fails\n\n### Common Failure Reasons\n1. **Agent Timeout** (> 10 seconds)\n2. **Agent Unreachable** (network/server down)\n3. **Agent Error** (500 response)\n4. **Invalid Response** (malformed JSON)\n\n### Error Flow\n```\nAgent API Fails\n  ↓\n[A] Log Error in Database\n  ↓\n[B] Send Fallback Response to User\n```\n\n### What Gets Logged\n```sql\nINSERT INTO message_history (\n  transmission_status = 'failed',\n  error_details = {\n    \"error_type\": \"agent_unreachable\",\n    \"error_message\": \"...\",\n    \"timestamp\": \"...\"\n  }\n)\n```\n\n### Fallback Message to User\n> \"Sorry, I'm having trouble connecting right now. Please try again in a moment.\"\n\n### Monitoring\nQuery failed transmissions:\n```sql\nSELECT * FROM analyze_failed_transmissions('1 hour');\n```\n\n### Troubleshooting\n1. Check agent is running\n2. Verify endpoint URL in database\n3. Test agent health: `curl {endpoint}/health`\n4. Review n8n execution logs\n5. Check agent logs for errors\n\n### ⚡ Automatic Retries\nAgent API node retries 3 times before failing.\nRetry interval: 1 second",
+        "height": 560,
+        "width": 400,
+        "color": 1
+      },
+      "id": "error-handling-note",
+      "name": "📝 Error Handling",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1520, 580]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Response>\n    <Message>Sorry, I'm having trouble connecting right now. Please try again in a moment.</Message>\n</Response>",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/xml"
+              }
+            ]
+          }
+        }
+      },
+      "id": "error-response",
+      "name": "Error Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1780, 400],
+      "notes": "⚠️ FALLBACK: User gets friendly error message"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO message_history (\n  session_id,\n  direction,\n  sender,\n  recipient,\n  message_text,\n  transmission_path,\n  transmission_status,\n  error_details,\n  n8n_execution_id\n) VALUES (\n  '={{ $('Session Lookup').item.json.session_id }}',\n  'outbound',\n  '={{ $('Parse Twilio Data').item.json.phone_to }}',\n  '={{ $('Parse Twilio Data').item.json.phone_from }}',\n  'Error occurred',\n  '{\"path\": [\"agent_api\"], \"error_at\": \"call_agent_api\"}'::jsonb,\n  'failed',\n  '{\"error_type\": \"agent_unreachable\", \"error_message\": \"{{ $json.error.message }}\", \"timestamp\": \"={{ $now.toISO() }}\"}'::jsonb,\n  '={{ $execution.id }}'\n);",
+        "options": {}
+      },
+      "id": "log-error",
+      "name": "Log Error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1560, 400],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      },
+      "notes": "🚨 Logs transmission failure for debugging and monitoring"
+    },
+    {
+      "parameters": {
+        "content": "## 🧪 TESTING GUIDE\n\n### 1. Test Workflow Manually\n1. Click \"Test Workflow\" button\n2. Click \"Twilio Webhook\" node\n3. Click \"Listen for Test Event\"\n4. Use curl or Postman:\n\n```bash\ncurl -X POST {webhook-url} \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"body\": {\n      \"From\": \"+15551111111\",\n      \"To\": \"+15558888888\",\n      \"Body\": \"Test message\",\n      \"MessageSid\": \"SM-test-123\"\n    }\n  }'\n```\n\n### 2. Verify Database\n```sql\n-- Check session created\nSELECT * FROM agent_sessions\nWHERE phone_number = '+15551111111';\n\n-- Check messages logged\nSELECT * FROM message_history\nORDER BY timestamp DESC\nLIMIT 5;\n```\n\n### 3. Test with Real SMS\n1. Deploy database schema\n2. Register mock agent\n3. Activate this workflow\n4. Configure Twilio webhook\n5. Send SMS to Twilio number\n6. Check execution logs\n\n### 4. Monitor Performance\n```sql\n-- Transmission metrics\nSELECT * FROM get_transmission_metrics('1 hour');\n\n-- Agent performance\nSELECT * FROM agent_performance;\n\n-- Failed transmissions\nSELECT * FROM analyze_failed_transmissions('1 hour');\n```",
+        "height": 560,
+        "width": 400,
+        "color": 4
+      },
+      "id": "testing-note",
+      "name": "📝 Testing Guide",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [380, 1000]
+    },
+    {
+      "parameters": {
+        "content": "## ⚙️ CONFIGURATION CHECKLIST\n\n### Prerequisites\n\n**1. PostgreSQL Database**\n- [ ] Database created: `darkspere`\n- [ ] Schema deployed: `schema/deploy.sql`\n- [ ] Test data loaded: `schema/test_data.sql`\n- [ ] Connection string saved\n\n**2. n8n Credential**\n- [ ] Go to: Credentials → Add Credential\n- [ ] Type: Postgres\n- [ ] Name: `DarkSpere PostgreSQL`\n- [ ] Host, Database, User, Password\n- [ ] Port: 5432, SSL: Enabled\n- [ ] Test connection successful\n\n**3. Agent Registered**\n```sql\nINSERT INTO agent_registry (\n  agent_name,\n  agent_type,\n  endpoint_url,\n  api_key_hash,\n  status\n) VALUES (\n  'MockTestAgent',\n  'test',\n  'http://localhost:8001/chat',\n  'test-key-123',\n  'active'\n);\n```\n\n**4. Twilio Setup**\n- [ ] Account created\n- [ ] Phone number purchased\n- [ ] Webhook configured:\n  - URL: {this workflow's webhook URL}\n  - Method: HTTP POST\n  - Path: /sms/incoming\n\n**5. Workflow Activation**\n- [ ] All credentials configured\n- [ ] Workflow is \"Active\"\n- [ ] Webhook URL copied\n\n### Quick Health Check\n```sql\nSELECT COUNT(*) FROM agent_registry WHERE status='active';\nSELECT * FROM active_sessions_summary;\nSELECT * FROM transmission_monitoring LIMIT 10;\n```",
+        "height": 640,
+        "width": 400,
+        "color": 4
+      },
+      "id": "config-note",
+      "name": "📝 Configuration",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [820, 1000]
+    },
+    {
+      "parameters": {
+        "content": "## 🔍 TROUBLESHOOTING\n\n### Issue: Workflow Not Triggering\n\n**Check**:\n1. Workflow is Active (toggle on)\n2. Twilio webhook URL matches exactly\n3. Twilio phone number configured\n4. n8n cloud is accessible\n\n**Verify**: Twilio Console → Debugger\n\n---\n\n### Issue: Session Lookup Fails\n\n**Error**: No session returned\n\n**Check**:\n```sql\n-- Function exists?\nSELECT routine_name\nFROM information_schema.routines\nWHERE routine_name = 'get_or_create_session';\n\n-- Active agents?\nSELECT * FROM agent_registry\nWHERE status = 'active';\n```\n\n**Fix**: Deploy schema or activate agent\n\n---\n\n### Issue: Agent API Timeout\n\n**Error**: Request timeout after 10s\n\n**Check**:\n1. Agent is running\n2. Endpoint URL correct in database\n3. Network connectivity\n4. Agent responds to health check\n\n```bash\ncurl http://localhost:8001/health\n```\n\n---\n\n### Issue: Database Connection Failed\n\n**Error**: Connection refused\n\n**Check**:\n1. Credential configured in n8n\n2. SSL mode correct (require)\n3. Host/port correct\n4. Firewall allows n8n IPs\n\n**Test**:\n```bash\npsql \"your-connection-string\"\n```\n\n---\n\n### Debug Execution\n\n1. Go to: Executions tab\n2. Find failed execution\n3. Click to view details\n4. Check each node's output\n5. Review error messages",
+        "height": 680,
+        "width": 400,
+        "color": 1
+      },
+      "id": "troubleshooting-note",
+      "name": "📝 Troubleshooting",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1260, 1000]
+    },
+    {
+      "parameters": {
+        "content": "## 📊 PERFORMANCE METRICS\n\n### Target Latencies\n\n| Stage | Target | Actual |\n|-------|--------|--------|\n| Session Lookup | < 50ms | ⏱️ |\n| Context Retrieval | < 100ms | ⏱️ |\n| Agent API Call | < 5s | ⏱️ |\n| Message Storage | < 30ms | ⏱️ |\n| **Total Roundtrip** | **< 8s** | ⏱️ |\n\n### Throughput\n- Single worker: 100-200 msgs/min\n- Queue mode (3 workers): 500+ msgs/min\n\n### Monitoring Queries\n\n**Real-time metrics**:\n```sql\nSELECT * FROM get_transmission_metrics('1 hour');\n```\n\n**Per-minute stats**:\n```sql\nSELECT * FROM transmission_monitoring\nORDER BY minute DESC\nLIMIT 20;\n```\n\n**Agent performance**:\n```sql\nSELECT\n  agent_name,\n  messages_processed,\n  avg_processing_ms,\n  p95_processing_ms,\n  failed\nFROM agent_performance;\n```\n\n**Failed transmissions**:\n```sql\nSELECT * FROM analyze_failed_transmissions('1 hour');\n```\n\n### Scaling Options\n1. Enable n8n queue mode\n2. Add Redis for job queue\n3. Scale PostgreSQL (connection pooling)\n4. Deploy multiple workers",
+        "height": 600,
+        "width": 400,
+        "color": 3
+      },
+      "id": "performance-note",
+      "name": "📝 Performance",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1700, 1000]
+    }
+  ],
+  "connections": {
+    "Twilio Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse Twilio Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Twilio Data": {
+      "main": [
+        [
+          {
+            "node": "Session Lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Session Lookup": {
+      "main": [
+        [
+          {
+            "node": "Check Session Exists",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Session Exists": {
+      "main": [
+        [
+          {
+            "node": "Get Conversation Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Conversation Context": {
+      "main": [
+        [
+          {
+            "node": "Store Inbound Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Inbound Message": {
+      "main": [
+        [
+          {
+            "node": "Call Agent API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Agent API": {
+      "main": [
+        [
+          {
+            "node": "Store Outbound Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "error": [
+        [
+          {
+            "node": "Log Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Outbound Message": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Error": {
+      "main": [
+        [
+          {
+            "node": "Error Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "DarkSpere",
+      "id": "darkspere"
+    },
+    {
+      "name": "SMS",
+      "id": "sms"
+    },
+    {
+      "name": "Production",
+      "id": "production"
+    }
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2025-10-10T00:00:00.000Z",
+  "versionId": "1.0.0"
+}

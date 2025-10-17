@@ -1,0 +1,344 @@
+{
+  "name": "DarkSpere: Billing Usage Aggregation",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "hourly-trigger",
+      "name": "Every Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT agent_id, COUNT(*) as message_count, SUM(CASE WHEN direction = 'inbound' THEN 1 ELSE 0 END) as inbound_count, SUM(CASE WHEN direction = 'outbound' THEN 1 ELSE 0 END) as outbound_count, MIN(created_at) as period_start, MAX(created_at) as period_end FROM message_history WHERE created_at >= NOW() - INTERVAL '1 hour' AND created_at < NOW() GROUP BY agent_id",
+        "options": {}
+      },
+      "id": "get-hourly-usage",
+      "name": "Get Hourly Usage",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [450, 300],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT subscription_id, stripe_customer_id FROM agent_registry WHERE agent_id = $1",
+        "options": {
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "agent_id",
+                "value": "={{ $json.agent_id }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "get-subscription-info",
+      "name": "Get Subscription Info",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [650, 300],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO usage_records (agent_id, subscription_id, period_start, period_end, message_count, inbound_count, outbound_count, total_cost, metadata) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (agent_id, period_start) DO UPDATE SET message_count = EXCLUDED.message_count, inbound_count = EXCLUDED.inbound_count, outbound_count = EXCLUDED.outbound_count, total_cost = EXCLUDED.total_cost, updated_at = NOW() RETURNING *",
+        "options": {
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "agent_id",
+                "value": "={{ $('Get Hourly Usage').item.json.agent_id }}"
+              },
+              {
+                "name": "subscription_id",
+                "value": "={{ $json.subscription_id }}"
+              },
+              {
+                "name": "period_start",
+                "value": "={{ $('Get Hourly Usage').item.json.period_start }}"
+              },
+              {
+                "name": "period_end",
+                "value": "={{ $('Get Hourly Usage').item.json.period_end }}"
+              },
+              {
+                "name": "message_count",
+                "value": "={{ $('Get Hourly Usage').item.json.message_count }}"
+              },
+              {
+                "name": "inbound_count",
+                "value": "={{ $('Get Hourly Usage').item.json.inbound_count }}"
+              },
+              {
+                "name": "outbound_count",
+                "value": "={{ $('Get Hourly Usage').item.json.outbound_count }}"
+              },
+              {
+                "name": "total_cost",
+                "value": "={{ ($('Get Hourly Usage').item.json.message_count * 0.001).toFixed(4) }}"
+              },
+              {
+                "name": "metadata",
+                "value": "={{ JSON.stringify({ aggregated_at: new Date().toISOString(), stripe_customer_id: $json.stripe_customer_id }) }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "record-usage",
+      "name": "Record Usage",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [850, 300],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $('Get Subscription Info').item.json.subscription_id }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "string",
+                      "operation": "notEmpty"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Has Subscription"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $('Get Subscription Info').item.json.subscription_id }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "string",
+                      "operation": "isEmpty"
+                    }
+                  }
+                ],
+                "combinator": "or"
+              },
+              "renameOutput": true,
+              "outputKey": "No Subscription"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "subscription-check",
+      "name": "Check Subscription",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.3,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.stripe.com/v1/subscription_items/{{ $('Get Subscription Info').item.json.subscription_id }}/usage_records",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "quantity",
+              "value": "={{ $('Get Hourly Usage').item.json.message_count }}"
+            },
+            {
+              "name": "timestamp",
+              "value": "={{ Math.floor(new Date($('Get Hourly Usage').item.json.period_end).getTime() / 1000) }}"
+            },
+            {
+              "name": "action",
+              "value": "increment"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "report-to-stripe",
+      "name": "Report to Stripe",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1250, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "stripe-api-key",
+          "name": "Stripe API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE usage_records SET stripe_reported = TRUE, stripe_usage_record_id = $2, updated_at = NOW() WHERE agent_id = $1 AND period_start = $3",
+        "options": {
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "agent_id",
+                "value": "={{ $('Get Hourly Usage').item.json.agent_id }}"
+              },
+              {
+                "name": "stripe_record_id",
+                "value": "={{ $json.id }}"
+              },
+              {
+                "name": "period_start",
+                "value": "={{ $('Get Hourly Usage').item.json.period_start }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "mark-stripe-reported",
+      "name": "Mark Stripe Reported",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1450, 200],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every Hour": {
+      "main": [
+        [
+          {
+            "node": "Get Hourly Usage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Hourly Usage": {
+      "main": [
+        [
+          {
+            "node": "Get Subscription Info",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Subscription Info": {
+      "main": [
+        [
+          {
+            "node": "Record Usage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Usage": {
+      "main": [
+        [
+          {
+            "node": "Check Subscription",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Subscription": {
+      "main": [
+        [
+          {
+            "node": "Report to Stripe",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Report to Stripe": {
+      "main": [
+        [
+          {
+            "node": "Mark Stripe Reported",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "DarkSpere",
+      "id": "darkspere"
+    },
+    {
+      "name": "Billing",
+      "id": "billing"
+    },
+    {
+      "name": "Stripe",
+      "id": "stripe"
+    }
+  ]
+}

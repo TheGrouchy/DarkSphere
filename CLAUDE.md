@@ -1,0 +1,1 @@
+- Data Transmission from component to component is the most important factor of this projects base architecture.

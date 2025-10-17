@@ -1,0 +1,5 @@
+agent_name,agent_type,endpoint_url,api_key_hash,capabilities,status,max_concurrent_sessions,owner_email
+MockTestAgent,test,http://localhost:8001/chat,test-key-123,"[""faq"", ""general""]",active,10,test@example.com
+CustomerSupportBot,customer_support,https://agent.example.com/support,support-key-456,"[""faq_lookup"", ""ticket_creation"", ""order_status""]",active,20,support@example.com
+SalesAssistant,sales,https://agent.example.com/sales,sales-key-789,"[""product_info"", ""pricing"", ""quote_generation""]",active,15,sales@example.com
+TechSupportAgent,technical,https://agent.example.com/tech,tech-key-abc,"[""troubleshooting"", ""api_access"", ""code_examples""]",inactive,5,tech@example.com

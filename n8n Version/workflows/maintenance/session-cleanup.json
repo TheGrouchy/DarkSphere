@@ -1,0 +1,296 @@
+{
+  "name": "DarkSpere: Session Cleanup & Maintenance",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "cleanup-schedule",
+      "name": "Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT expire_old_sessions() as expired_count",
+        "options": {}
+      },
+      "id": "expire-sessions",
+      "name": "Expire Old Sessions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [450, 200],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DELETE FROM message_history WHERE created_at < NOW() - INTERVAL '30 days' RETURNING COUNT(*) as deleted_count",
+        "options": {}
+      },
+      "id": "cleanup-old-messages",
+      "name": "Cleanup Old Messages",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [450, 300],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DELETE FROM agent_health_checks WHERE created_at < NOW() - INTERVAL '7 days' RETURNING COUNT(*) as deleted_count",
+        "options": {}
+      },
+      "id": "cleanup-health-checks",
+      "name": "Cleanup Health Checks",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [450, 400],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "VACUUM ANALYZE agent_sessions",
+        "options": {}
+      },
+      "id": "vacuum-sessions",
+      "name": "Vacuum Sessions Table",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [650, 200],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "VACUUM ANALYZE message_history",
+        "options": {}
+      },
+      "id": "vacuum-messages",
+      "name": "Vacuum Messages Table",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [650, 300],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "REINDEX TABLE agent_sessions",
+        "options": {}
+      },
+      "id": "reindex-sessions",
+      "name": "Reindex Sessions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [650, 400],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT tablename, pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size FROM pg_tables WHERE schemaname = 'public' AND tablename IN ('agent_sessions', 'message_history', 'agent_health_checks') ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC",
+        "options": {}
+      },
+      "id": "get-table-sizes",
+      "name": "Get Table Sizes",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [850, 300],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO maintenance_logs (task_type, details, metrics, completed_at) VALUES ('session_cleanup', $1, $2, NOW())",
+        "options": {
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "details",
+                "value": "={{ JSON.stringify({ expired_sessions: $('Expire Old Sessions').item.json.expired_count, deleted_messages: $('Cleanup Old Messages').item.json.deleted_count, deleted_health_checks: $('Cleanup Health Checks').item.json.deleted_count }) }}"
+              },
+              {
+                "name": "metrics",
+                "value": "={{ JSON.stringify({ table_sizes: $json }) }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "log-maintenance",
+      "name": "Log Maintenance",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1050, 300],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 15 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Expire Old Sessions",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Cleanup Old Messages",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Cleanup Health Checks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expire Old Sessions": {
+      "main": [
+        [
+          {
+            "node": "Vacuum Sessions Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cleanup Old Messages": {
+      "main": [
+        [
+          {
+            "node": "Vacuum Messages Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cleanup Health Checks": {
+      "main": [
+        [
+          {
+            "node": "Reindex Sessions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vacuum Sessions Table": {
+      "main": [
+        [
+          {
+            "node": "Get Table Sizes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vacuum Messages Table": {
+      "main": [
+        [
+          {
+            "node": "Get Table Sizes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reindex Sessions": {
+      "main": [
+        [
+          {
+            "node": "Get Table Sizes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Table Sizes": {
+      "main": [
+        [
+          {
+            "node": "Log Maintenance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "DarkSpere",
+      "id": "darkspere"
+    },
+    {
+      "name": "Maintenance",
+      "id": "maintenance"
+    },
+    {
+      "name": "Cleanup",
+      "id": "cleanup"
+    }
+  ]
+}

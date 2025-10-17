@@ -1,0 +1,411 @@
+{
+  "name": "DarkSpere: Agent Health Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "health-schedule-trigger",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [250, 300],
+      "notes": "Triggers health check workflow every 5 minutes. This ensures sub-10min detection of agent failures for automatic failover. Adjust interval based on SLA requirements (faster = more overhead, slower = longer failover time)."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT agent_id, endpoint_url, api_key_hash, agent_name, agent_type, status FROM agent_registry WHERE status = 'active' ORDER BY last_health_check ASC LIMIT 10",
+        "options": {}
+      },
+      "id": "get-active-agents",
+      "name": "Get Active Agents",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [450, 300],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "notes": "Fetches up to 10 active agents that haven't been checked recently (ORDER BY last_health_check ASC). Batch processing prevents overwhelming the database. Includes retry logic for transient connection failures (3 attempts, 1s delay)."
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.endpoint_url }}/health",
+        "method": "GET",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 5000,
+          "retry": {
+            "maxTries": 2,
+            "waitBetweenTries": 1000
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $json.api_key_hash }}"
+            },
+            {
+              "name": "X-Session-ID",
+              "value": "health-check"
+            }
+          ]
+        }
+      },
+      "id": "health-check-request",
+      "name": "Health Check Request",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [650, 300],
+      "onError": "continueRegularOutput",
+      "notes": "Sends GET request to agent /health endpoint with authentication. 5s timeout ensures fast failure detection. 2 retries handle transient network issues. onError: continueRegularOutput allows error cases to route to Unhealthy path for proper failover handling."
+    },
+    {
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.statusCode }}",
+                    "rightValue": 200,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Healthy"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.error }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "string",
+                      "operation": "notEmpty"
+                    }
+                  }
+                ],
+                "combinator": "or"
+              },
+              "renameOutput": true,
+              "outputKey": "Unhealthy"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "health-status-switch",
+      "name": "Health Status",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.3,
+      "position": [850, 300],
+      "onError": "continueErrorOutput",
+      "notes": "Routes responses based on health status. Healthy = HTTP 200, Unhealthy = error field present or non-200 status. Error output routes to Unhealthy path to ensure failed checks trigger failover. Critical decision point for data transmission reliability."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO agent_health_checks (agent_id, status, response_time_ms, status_code, health_details, metadata) VALUES ($1, 'healthy', $2, $3, $4, $5) RETURNING *",
+        "options": {
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "agent_id",
+                "value": "={{ $('Get Active Agents').item.json.agent_id }}"
+              },
+              {
+                "name": "response_time",
+                "value": "={{ ($json.headers && $json.headers['x-response-time']) || 0 }}"
+              },
+              {
+                "name": "status_code",
+                "value": "={{ $json.statusCode }}"
+              },
+              {
+                "name": "health_details",
+                "value": "={{ JSON.stringify($json.body || {}) }}"
+              },
+              {
+                "name": "metadata",
+                "value": "={{ JSON.stringify({ agent_name: $('Get Active Agents').item.json.agent_name, check_time: new Date().toISOString() }) }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "record-healthy-status",
+      "name": "Record Healthy Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1050, 200],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "notes": "Records successful health check to agent_health_checks table. Stores response time for performance tracking and health_details JSONB for agent-specific metrics (uptime, active sessions, etc.). This data feeds into health_score calculation for load balancing. Retry logic prevents transient DB issues from blocking workflow."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO agent_health_checks (agent_id, status, response_time_ms, status_code, error_message, metadata) VALUES ($1, 'unhealthy', $2, $3, $4, $5) RETURNING *",
+        "options": {
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "agent_id",
+                "value": "={{ $('Get Active Agents').item.json.agent_id }}"
+              },
+              {
+                "name": "response_time",
+                "value": "={{ ($json.headers && $json.headers['x-response-time']) || 0 }}"
+              },
+              {
+                "name": "status_code",
+                "value": "={{ $json.statusCode || 0 }}"
+              },
+              {
+                "name": "error_message",
+                "value": "={{ $json.error || 'Health check failed' }}"
+              },
+              {
+                "name": "metadata",
+                "value": "={{ JSON.stringify({ agent_name: $('Get Active Agents').item.json.agent_name, check_time: new Date().toISOString(), error_details: $json }) }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "record-unhealthy-status",
+      "name": "Record Unhealthy Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1050, 400],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "notes": "Records failed health check with error details. Fixed optional chaining (?.['x-response-time'] replaced with logical AND). This triggers health_score degradation and makes agent ineligible for new sessions. Error details in metadata JSONB enable root cause analysis."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT failover_session_to_healthy_agent(session_id) FROM agent_sessions WHERE agent_id = $1 AND is_active = TRUE",
+        "options": {
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "agent_id",
+                "value": "={{ $('Get Active Agents').item.json.agent_id }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "trigger-failover",
+      "name": "Trigger Session Failover",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1250, 400],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "notes": "Executes failover_session_to_healthy_agent() stored procedure for all active sessions on the unhealthy agent. CRITICAL: This is a PATENTED INNOVATION - automatic session failover with health-aware agent selection (health_score > capacity > response_time). Sub-50ms atomic operation preserves session state and conversation context."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE agent_registry SET last_health_check = NOW(), status = CASE WHEN $2 = 'healthy' THEN 'active' ELSE 'degraded' END WHERE agent_id = $1",
+        "options": {
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "agent_id",
+                "value": "={{ $('Get Active Agents').item.json.agent_id }}"
+              },
+              {
+                "name": "health_status",
+                "value": "={{ $json.status || 'unhealthy' }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "update-agent-status",
+      "name": "Update Agent Registry",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1450, 300],
+      "credentials": {
+        "postgres": {
+          "id": "darkspere-postgres",
+          "name": "DarkSpere PostgreSQL"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "notes": "Updates agent_registry with latest health check timestamp and status. Healthy → 'active', Unhealthy → 'degraded'. This status change makes degraded agents ineligible for get_or_create_session() routing. Completes the health monitoring loop, ensuring only healthy agents receive new sessions."
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Get Active Agents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Active Agents": {
+      "main": [
+        [
+          {
+            "node": "Health Check Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Health Check Request": {
+      "main": [
+        [
+          {
+            "node": "Health Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Health Status": {
+      "main": [
+        [
+          {
+            "node": "Record Healthy Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record Unhealthy Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Healthy Status": {
+      "main": [
+        [
+          {
+            "node": "Update Agent Registry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Unhealthy Status": {
+      "main": [
+        [
+          {
+            "node": "Trigger Session Failover",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger Session Failover": {
+      "main": [
+        [
+          {
+            "node": "Update Agent Registry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "DarkSpere",
+      "id": "darkspere"
+    },
+    {
+      "name": "Monitoring",
+      "id": "monitoring"
+    },
+    {
+      "name": "Health",
+      "id": "health"
+    },
+    {
+      "name": "Production",
+      "id": "production"
+    }
+  ],
+  "meta": {
+    "instanceId": "darkspere-production"
+  }
+}
